@@ -1,4 +1,4 @@
-name: Ubuntu 20.04 SSH via Tailscale (A)
+name: Ubuntu 22.04 SSH via Tailscale (A)
 
 on:
   workflow_dispatch:
@@ -48,12 +48,12 @@ env:
   PG_HOST: postgres_db
   PG_DB: my_app_state
   PG_USER: gh_actions_user
-  PG_PASS: securepassword123 # <<< CHANGE THIS PASSWORD!
+  PG_PASS: Megamind[@254]Dark
   PG_PORT: 5432
 
 jobs:
   ssh:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 370
     # --- PostgreSQL Service Container Definition ---
     services:
@@ -110,12 +110,11 @@ jobs:
           echo "runtime=$RUNTIME" >> "$GITHUB_OUTPUT"
           echo "loops=$LOOPS" >> "$GITHUB_OUTPUT"
           echo "Resolved: test=$IS_TEST, runtime=$RUNTIME, loops=$LOOPS"
-      
+
       - name: Install PostgreSQL Client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
         
       - name: Restore State from PostgreSQL (Step A)
-        # Run first to restore data before any other setup steps
         run: |
           set -euo pipefail
           echo "Attempting to connect to PostgreSQL..."
@@ -149,19 +148,18 @@ jobs:
             # Ensure the permissions/ownership for the restored user's home are correct
             sudo chown -R ${{ env.SSH_USER }}:${{ env.SSH_USER }} /home/${{ env.SSH_USER }}
             
-            echo "User state successfully restored. The environment should resume."
+            echo "User state successfully restored."
           else
             echo "No previous state found. Starting fresh."
           fi
 
       - name: Install prerequisites, tailscale, openssh-server, jq
-        # This step re-runs basic installs but restored files (like PM2 configs) will persist.
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y curl gnupg2 apt-transport-https ca-certificates lsb-release
-          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/focal.gpg | sudo apt-key add -
-          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/focal.list | sudo tee /etc/apt/sources.list.d/tailscale.list
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.gpg | sudo apt-key add -
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.list | sudo tee /etc/apt/sources.list.d/tailscale.list
           sudo apt-get update
           sudo apt-get install -y tailscale openssh-server jq
           sudo systemctl enable --now tailscaled
@@ -240,9 +238,8 @@ jobs:
             echo "SSH alive... ($left min left)"
             sleep 60
           done
-      
+
       - name: Save State to PostgreSQL (Step A)
-        # This step runs right before the workflow dispatches to B
         if: always()
         run: |
           set -euo pipefail
@@ -266,7 +263,7 @@ jobs:
             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
           "
           
-          # Also save the current workflow status
+          # Save the current workflow status
           psql -h ${{ env.PG_HOST }} -p ${{ env.PG_PORT }} -U ${{ env.PG_USER }} -d ${{ env.PG_DB }} -c "
             INSERT INTO session_data (key, value) VALUES ('last_workflow', 'A')
             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
