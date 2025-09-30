@@ -1,4 +1,4 @@
-name: Ubuntu 20.04 SSH via Tailscale (B)
+name: Ubuntu 22.04 SSH via Tailscale (B)
 
 on:
   workflow_dispatch:
@@ -47,7 +47,7 @@ env:
 
 jobs:
   ssh:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 370
     steps:
       - name: Resolve inputs (safe)
@@ -94,8 +94,8 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y curl gnupg2 apt-transport-https ca-certificates lsb-release
-          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/focal.gpg | sudo apt-key add -
-          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/focal.list | sudo tee /etc/apt/sources.list.d/tailscale.list
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.gpg | sudo apt-key add -
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.list | sudo tee /etc/apt/sources.list.d/tailscale.list
           sudo apt-get update
           sudo apt-get install -y tailscale openssh-server jq
           sudo systemctl enable --now tailscaled
@@ -207,7 +207,7 @@ jobs:
           if [ "$loops" -eq 1 ]; then echo "Loops finished; not dispatching."; exit 0; fi
           if [ "$loops" -gt 1 ]; then next=$((loops-1)); else next=0; fi
           token="${{ steps.cfg.outputs.pat }}"
-          body=$(jq -n --arg ref "${{ github.ref_name }}" --arg tailnet "${{ steps.cfg.outputs.tailnet }}" --arg apikey "${{ steps.cfg.outputs.apikey }}" --arg authkey "${{ steps.cfg.outputs.authkey }}" --arg pat "$token" --arg test_mode "false" --arg runtime "${{ steps.cfg.outputs.runtime }}" --argjson loops "$next" '{
+          body=$(jq -n --arg ref "${{ github.ref_name }}" --arg tailnet "${{ steps.cfg.outputs.tailnet }}" --arg apikey "${{ steps.cfg.outputs.apikey }}" --arg authkey "${{ steps.cfg.outputs.authauthkey }}" --arg pat "$token" --arg test_mode "false" --arg runtime "${{ steps.cfg.outputs.runtime }}" --argjson loops "$next" '{
             ref: $ref,
             inputs: {
               ts_tailnet: $tailnet,
