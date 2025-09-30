@@ -47,7 +47,7 @@ defaults:
 
 env:
   RDP_USER: Swaju
-  RDP_PASS: swaju@254
+  RDP_PASS: Megamind[@254]Dark
   TS_HOSTNAME: swaju
 
 jobs:
