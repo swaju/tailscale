@@ -1,0 +1,228 @@
+name: Ubuntu 20.04 SSH via Tailscale (A)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ts_tailnet:
+        description: "Tailscale tailnet (e.g. you@gmail.com)"
+        required: true
+      ts_api_key:
+        description: "Tailscale API key (device admin, no 'Bearer')"
+        required: true
+      ts_authkey:
+        description: "Tailscale auth key (reusable or ephemeral)"
+        required: true
+      gh_api_token:
+        description: "GitHub Personal Access Token (classic; scopes: repo, workflow)"
+        required: true
+      test_mode:
+        description: "Run 5-minute test loop"
+        type: boolean
+        default: false
+      runtime_minutes:
+        description: "Runtime in minutes (max 360; capped to 355)"
+        required: false
+        default: "355"
+      loops:
+        description: "How many handoffs (0 = infinite)"
+        required: false
+        default: "0"
+
+concurrency:
+  group: tailscale-ssh-singleton
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  SSH_USER: swaju
+  SSH_PASS: "Megamind[@254]Dark"
+  TS_HOSTNAME: swaju
+
+jobs:
+  ssh:
+    runs-on: ubuntu-20.04
+    timeout-minutes: 370
+    steps:
+      - name: Resolve inputs (safe)
+        id: cfg
+        run: |
+          set -euo pipefail
+          RAW_TAILNET="${{ github.event.inputs.ts_tailnet }}"
+          RAW_APIKEY="${{ github.event.inputs.ts_api_key }}"
+          RAW_AUTHKEY="${{ github.event.inputs.ts_authkey }}"
+          RAW_PAT="${{ github.event.inputs.gh_api_token }}"
+          RAW_TEST="${{ github.event.inputs.test_mode }}"
+          RAW_RUNTIME="${{ github.event.inputs.runtime_minutes || '355' }}"
+          RAW_LOOPS="${{ github.event.inputs.loops || '0' }}"
+
+          to_int_or() {
+            [[ "$1" =~ ^[0-9]+$ ]] && echo "$1" || echo "$2"
+          }
+
+          if [ -z "$RAW_TAILNET" ] || [ -z "$RAW_APIKEY" ] || [ -z "$RAW_AUTHKEY" ] || [ -z "$RAW_PAT" ]; then
+            echo "Missing required inputs" >&2
+            exit 1
+          fi
+
+          if [[ "$RAW_TEST" =~ ^(?i:true|1|yes|on)$ ]]; then IS_TEST=true; else IS_TEST=false; fi
+
+          RUNTIME=$(to_int_or "$RAW_RUNTIME" 355)
+          if [ "$IS_TEST" = true ]; then RUNTIME=5; fi
+          if [ "$IS_TEST" = false ] && [ "$RUNTIME" -lt 6 ]; then RUNTIME=355; fi
+          if [ "$RUNTIME" -gt 360 ]; then RUNTIME=355; fi
+
+          LOOPS=$(to_int_or "$RAW_LOOPS" 0)
+          if [ "$LOOPS" -lt 0 ]; then LOOPS=0; fi
+
+          echo "tailnet=$RAW_TAILNET" >> "$GITHUB_OUTPUT"
+          echo "apikey=$RAW_APIKEY" >> "$GITHUB_OUTPUT"
+          echo "authkey=$RAW_AUTHKEY" >> "$GITHUB_OUTPUT"
+          echo "pat=$RAW_PAT" >> "$GITHUB_OUTPUT"
+          echo "runtime=$RUNTIME" >> "$GITHUB_OUTPUT"
+          echo "loops=$LOOPS" >> "$GITHUB_OUTPUT"
+          echo "Resolved: test=$IS_TEST, runtime=$RUNTIME, loops=$LOOPS"
+
+      - name: Install prerequisites, tailscale, openssh-server, jq
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y curl gnupg2 apt-transport-https ca-certificates lsb-release
+          # Add Tailscale apt repo for focal (Ubuntu 20.04)
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/focal.gpg | sudo apt-key add -
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/focal.list | sudo tee /etc/apt/sources.list.d/tailscale.list
+          sudo apt-get update
+          sudo apt-get install -y tailscale openssh-server jq
+          sudo systemctl enable --now tailscaled
+          sudo systemctl enable --now ssh
+          tailscale version || true
+
+      - name: Enable SSH user + configure sshd for password auth
+        run: |
+          set -euo pipefail
+          U="${{ env.SSH_USER }}"
+          P="${{ env.SSH_PASS }}"
+          if ! id -u "$U" >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash "$U"
+            echo "$U:$P" | sudo chpasswd
+            sudo usermod -aG sudo "$U" || true
+          else
+            echo "$U exists, resetting password"
+            echo "$U:$P" | sudo chpasswd
+            sudo usermod -U "$U" || true
+          fi
+          # Allow the user to log in via SSH
+          sudo mkdir -p /home/"$U"/.ssh
+          sudo chown "$U":"$U" /home/"$U"/.ssh
+          sudo chmod 700 /home/"$U"/.ssh
+          # Ensure sshd allows password auth (required for password-based RDP-style access)
+          sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+          sudo systemctl restart ssh
+
+      - name: PURGE any devices containing 'swaju' (startup)
+        run: |
+          set -euo pipefail
+          APIKEY="${{ steps.cfg.outputs.apikey }}"
+          TAILNET="${{ steps.cfg.outputs.tailnet }}"
+          TN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$TAILNET")
+          HDR="Authorization: Bearer $APIKEY"
+          set +e
+          resp=$(curl -sSL -H "$HDR" "https://api.tailscale.com/api/v2/tailnet/$TN/devices")
+          set -e
+          echo "$resp" | jq -c '.devices[]?' | while read -r d; do
+            name=$(echo "$d" | jq -r '.name // empty')
+            hostname=$(echo "$d" | jq -r '.hostname // empty')
+            dns=$(echo "$d" | jq -r '.DNSName // empty')
+            id=$(echo "$d" | jq -r '.id // empty')
+            if [[ "$name" =~ [sS][wW][aA][jJ][uU] ]] || [[ "$hostname" =~ [sS][wW][aA][jJ][uU] ]] || [[ "$dns" =~ [sS][wW][aA][jJ][uU] ]]; then
+              if [ -n "$id" ]; then
+                curl -sSL -X DELETE -H "$HDR" "https://api.tailscale.com/api/v2/device/$id" || true
+                echo "Deleted at start: $name"
+              fi
+            fi
+          done || echo "Startup purge failed"
+
+      - name: Tailscale up (hostname=swaju) + show IP/FQDN/DERP
+        id: up
+        run: |
+          set -euo pipefail
+          AUTHKEY="${{ steps.cfg.outputs.authkey }}"
+          HOSTNAME="${{ env.TS_HOSTNAME }}"
+          sudo tailscale logout || true
+          sudo tailscale up --authkey "$AUTHKEY" --hostname "$HOSTNAME" --accept-routes --accept-dns=false
+          sleep 2
+          ip4=$(tailscale ip -4 | head -n1 || true)
+          status_json=$(tailscale status --json || echo '{}')
+          fqdn=$(echo "$status_json" | jq -r '.Self.DNSName // empty')
+          derp=$(echo "$status_json" | jq -r '.Self.DERP // empty')
+          echo "ip4=$ip4" >> "$GITHUB_OUTPUT"
+          echo "fqdn=$fqdn" >> "$GITHUB_OUTPUT"
+          echo "derp=$derp" >> "$GITHUB_OUTPUT"
+          printf "### SSH (A)\nHost: %s\nIPv4: %s\nMagicDNS: %s\nDERP: %s\nUser: %s\nPass: %s\n" "$HOSTNAME" "$ip4" "$fqdn" "$derp" "${{ env.SSH_USER }}" "${{ env.SSH_PASS }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep alive
+        run: |
+          set -euo pipefail
+          mins=${{ steps.cfg.outputs.runtime }}
+          end=$(( $(date +%s) + mins*60 ))
+          while [ $(date +%s) -lt $end ]; do
+            left=$(( (end - $(date +%s) + 59) / 60 ))
+            echo "SSH alive... ($left min left)"
+            sleep 60
+          done
+
+      - name: PURGE any devices containing 'swaju' (exit)
+        if: always()
+        run: |
+          set -euo pipefail
+          APIKEY="${{ steps.cfg.outputs.apikey }}"
+          TAILNET="${{ steps.cfg.outputs.tailnet }}"
+          TN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$TAILNET")
+          HDR="Authorization: Bearer $APIKEY"
+          set +e
+          resp=$(curl -sSL -H "$HDR" "https://api.tailscale.com/api/v2/tailnet/$TN/devices")
+          set -e
+          echo "$resp" | jq -c '.devices[]?' | while read -r d; do
+            name=$(echo "$d" | jq -r '.name // empty')
+            hostname=$(echo "$d" | jq -r '.hostname // empty')
+            dns=$(echo "$d" | jq -r '.DNSName // empty')
+            id=$(echo "$d" | jq -r '.id // empty')
+            if [[ "$name" =~ [sS][wW][aA][jJ][uU] ]] || [[ "$hostname" =~ [sS][wW][aA][jJ][uU] ]] || [[ "$dns" =~ [sS][wW][aA][jJ][uU] ]]; then
+              if [ -n "$id" ]; then
+                curl -sSL -X DELETE -H "$HDR" "https://api.tailscale.com/api/v2/device/$id" || true
+                echo "Deleted at exit: $name"
+              fi
+            fi
+          done || echo "Exit purge failed"
+
+      - name: Dispatch workflow B (instant, forever by default)
+        if: always()
+        run: |
+          set -euo pipefail
+          loops=${{ steps.cfg.outputs.loops }}
+          if [ "$loops" -eq 1 ]; then echo "Loops finished; not dispatching."; exit 0; fi
+          if [ "$loops" -gt 1 ]; then next=$((loops-1)); else next=0; fi
+          token="${{ steps.cfg.outputs.pat }}"
+          body=$(jq -n --arg ref "${{ github.ref_name }}" --arg tailnet "${{ steps.cfg.outputs.tailnet }}" --arg apikey "${{ steps.cfg.outputs.apikey }}" --arg authkey "${{ steps.cfg.outputs.authkey }}" --arg pat "$token" --arg test_mode "false" --arg runtime "${{ steps.cfg.outputs.runtime }}" --argjson loops "$next" '{
+            ref: $ref,
+            inputs: {
+              ts_tailnet: $tailnet,
+              ts_api_key: $apikey,
+              ts_authkey: $authkey,
+              gh_api_token: $pat,
+              test_mode: $test_mode,
+              runtime_minutes: $runtime,
+              loops: ($loops|tostring)
+            }
+          }')
+          curl -sSL -X POST "https://api.github.com/repos/${{ github.repository }}/actions/workflows/ubuntu-ssh-tailscale-B.yml/dispatches" \
+            -H "Authorization: Bearer $token" \
+            -H "Accept: application/vnd.github+json" \
+            -d "$body"
