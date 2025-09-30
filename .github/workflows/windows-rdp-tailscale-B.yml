@@ -1,4 +1,4 @@
-name: Windows RDP via Tailscale (A)
+name: Windows RDP via Tailscale (B)
 
 on:
   workflow_dispatch:
@@ -27,6 +27,11 @@ on:
         description: "How many handoffs (0 = infinite)"
         required: false
         default: "0"
+
+  # Optional backup: start B when A completes (in case REST dispatch is blocked/rate-limited).
+  workflow_run:
+    workflows: ["Windows RDP via Tailscale (A)"]
+    types: [completed]
 
 concurrency:
   group: tailscale-rdp-singleton
@@ -154,7 +159,7 @@ jobs:
           "fqdn=$fqdn" | Out-File -Append $env:GITHUB_OUTPUT
           "derp=$derp" | Out-File -Append $env:GITHUB_OUTPUT
 
-          "### RDP (A)`nHost: $env:TS_HOSTNAME`nIPv4: $ip4`nMagicDNS: $fqdn`nDERP: $derp`nUser: $env:RDP_USER`nPass: $env:RDP_PASS" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "### RDP (B)`nHost: $env:TS_HOSTNAME`nIPv4: $ip4`nMagicDNS: $fqdn`nDERP: $derp`nUser: $env:RDP_USER`nPass: $env:RDP_PASS" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: ⏳ Keep alive
         run: |
@@ -186,7 +191,7 @@ jobs:
             }
           } catch { Write-Warning "Exit purge failed: $_" }
 
-      - name: 🔁 Dispatch workflow B (instant, forever by default)
+      - name: 🔁 Dispatch workflow A (instant, forever by default)
         if: always()
         run: |
           $loops=[int]"${{ steps.cfg.outputs.loops }}"
@@ -208,6 +213,6 @@ jobs:
           } | ConvertTo-Json -Depth 5
 
           Invoke-RestMethod -Method POST `
-            -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/windows-rdp-tailscale-B.yml/dispatches" `
+            -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/windows-rdp-tailscale-A.yml/dispatches" `
             -Headers @{ Authorization = "Bearer $token"; "Accept"="application/vnd.github+json" } `
             -Body $body
