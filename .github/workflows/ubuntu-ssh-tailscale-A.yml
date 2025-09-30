@@ -1,4 +1,4 @@
-name: Ubuntu 22.04 SSH via Tailscale (A)
+name: Ubuntu 20.04 SSH via Tailscale (A)
 
 on:
   workflow_dispatch:
@@ -44,11 +44,33 @@ env:
   SSH_USER: swaju
   SSH_PASS: "Megamind[@254]Dark"
   TS_HOSTNAME: swaju
+  # --- PostgreSQL Environment Variables ---
+  PG_HOST: postgres_db
+  PG_DB: my_app_state
+  PG_USER: gh_actions_user
+  PG_PASS: securepassword123 # <<< CHANGE THIS PASSWORD!
+  PG_PORT: 5432
 
 jobs:
   ssh:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-20.04
     timeout-minutes: 370
+    # --- PostgreSQL Service Container Definition ---
+    services:
+      postgres_db:
+        image: postgres:13-alpine
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_DB: ${{ env.PG_DB }}
+          POSTGRES_USER: ${{ env.PG_USER }}
+          POSTGRES_PASSWORD: ${{ env.PG_PASS }}
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    # -----------------------------------------------
     steps:
       - name: Resolve inputs (safe)
         id: cfg
@@ -88,14 +110,58 @@ jobs:
           echo "runtime=$RUNTIME" >> "$GITHUB_OUTPUT"
           echo "loops=$LOOPS" >> "$GITHUB_OUTPUT"
           echo "Resolved: test=$IS_TEST, runtime=$RUNTIME, loops=$LOOPS"
+      
+      - name: Install PostgreSQL Client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+        
+      - name: Restore State from PostgreSQL (Step A)
+        # Run first to restore data before any other setup steps
+        run: |
+          set -euo pipefail
+          echo "Attempting to connect to PostgreSQL..."
+          
+          # Wait for the service to be ready
+          while ! pg_isready -h ${{ env.PG_HOST }} -p ${{ env.PG_PORT }} -U ${{ env.PG_USER }} -d ${{ env.PG_DB }}; do
+            echo "Waiting for PostgreSQL service..."
+            sleep 5
+          done
+
+          # Create table if it doesn't exist (ensures first run works)
+          psql -h ${{ env.PG_HOST }} -p ${{ env.PG_PORT }} -U ${{ env.PG_USER }} -d ${{ env.PG_DB }} -c "
+            CREATE TABLE IF NOT EXISTS session_data (
+              key VARCHAR(255) PRIMARY KEY,
+              value TEXT
+            );
+          "
+
+          # --- 1. Retrieve the Base64 Data ---
+          ARCHIVE_BASE64=$(psql -h ${{ env.PG_HOST }} -p ${{ env.PG_PORT }} -U ${{ env.PG_USER }} -d ${{ env.PG_DB }} -t -A -c "SELECT value FROM session_data WHERE key = 'full_user_state';" || echo "")
+
+          if [ -n "$ARCHIVE_BASE64" ]; then
+            echo "Found saved state. Restoring files..."
+            
+            # --- 2. Decode and Write the Archive File ---
+            echo "$ARCHIVE_BASE64" | base64 -d > user_state_restore.tar.gz
+            
+            # --- 3. Extract the Files to the Root Directory (Restores /home/swaju) ---
+            sudo tar -xzf user_state_restore.tar.gz -C /
+            
+            # Ensure the permissions/ownership for the restored user's home are correct
+            sudo chown -R ${{ env.SSH_USER }}:${{ env.SSH_USER }} /home/${{ env.SSH_USER }}
+            
+            echo "User state successfully restored. The environment should resume."
+          else
+            echo "No previous state found. Starting fresh."
+          fi
 
       - name: Install prerequisites, tailscale, openssh-server, jq
+        # This step re-runs basic installs but restored files (like PM2 configs) will persist.
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y curl gnupg2 apt-transport-https ca-certificates lsb-release
-          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.gpg | sudo apt-key add -
-          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.list | sudo tee /etc/apt/sources.list.d/tailscale.list
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/focal.gpg | sudo apt-key add -
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/focal.list | sudo tee /etc/apt/sources.list.d/tailscale.list
           sudo apt-get update
           sudo apt-get install -y tailscale openssh-server jq
           sudo systemctl enable --now tailscaled
@@ -174,6 +240,38 @@ jobs:
             echo "SSH alive... ($left min left)"
             sleep 60
           done
+      
+      - name: Save State to PostgreSQL (Step A)
+        # This step runs right before the workflow dispatches to B
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "Saving full session state (User Directory) before dispatching to B..."
+          
+          # --- 1. Identify and Archive Critical Data (/home/swaju) ---
+          STATE_FILE="user_state_$(date +%s).tar.gz"
+          
+          sudo tar -czf "$STATE_FILE" \
+            --exclude='**/.cache' \
+            --exclude='**/.npm' \
+            --exclude='**/.local/share/Trash' \
+            --absolute-names /home/${{ env.SSH_USER }}
+            
+          # --- 2. Base64 Encode the Archive ---
+          ARCHIVE_BASE64=$(base64 -w 0 "$STATE_FILE")
+          
+          # --- 3. Store in PostgreSQL ---
+          psql -h ${{ env.PG_HOST }} -p ${{ env.PG_PORT }} -U ${{ env.PG_USER }} -d ${{ env.PG_DB }} -c "
+            INSERT INTO session_data (key, value) VALUES ('full_user_state', '$ARCHIVE_BASE64')
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+          "
+          
+          # Also save the current workflow status
+          psql -h ${{ env.PG_HOST }} -p ${{ env.PG_PORT }} -U ${{ env.PG_USER }} -d ${{ env.PG_DB }} -c "
+            INSERT INTO session_data (key, value) VALUES ('last_workflow', 'A')
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+          "
+          echo "Full state saved (Archive size: $(du -h "$STATE_FILE" | awk '{print $1}'))."
 
       - name: PURGE any devices containing 'swaju' (exit)
         if: always()
